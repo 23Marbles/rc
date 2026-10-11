@@ -44,6 +44,25 @@ struct Pty {
     child: Box<dyn PtyChild>,
 }
 
+impl Pty {
+    async fn write(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<PtyCommand>> {
+        self.sender.send(PtyCommand::Input(data)).await
+    }
+
+    async fn resize(&self, size: WindowSize) -> Result<(), mpsc::error::SendError<PtyCommand>> {
+        self.sender.send(PtyCommand::Resize(size)).await
+    }
+
+    async fn close(&mut self) -> Result<(), ServerError> {
+        if self.child.is_running() {
+            self.sender.send(PtyCommand::Close).await?;
+            self.child.kill()?;
+        }
+
+        Ok(())
+    }
+}
+
 impl Debug for Pty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pty")
@@ -117,7 +136,7 @@ impl server::Handler for Handler {
                 _term: term.to_string(),
                 cols,
                 rows,
-                _pixel_width: pixel_height,
+                _pixel_width: pixel_width,
                 _pixel_height: pixel_height,
                 _modes: modes.to_vec(),
             },
@@ -220,10 +239,9 @@ impl server::Handler for Handler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.ptys
-            .get_mut(&channel)
+            .get(&channel)
             .ok_or(ServerError::NoPty { channel })?
-            .sender
-            .send(PtyCommand::Input(data.to_vec()))
+            .write(data.to_vec())
             .await?;
 
         Ok(())
@@ -234,21 +252,22 @@ impl server::Handler for Handler {
         channel: ChannelId,
         col_width: u32,
         row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
+        pix_width: u32,
+        pix_height: u32,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let pty = self
             .ptys
-            .get_mut(&channel)
+            .get(&channel)
             .ok_or(ServerError::NoPty { channel })?;
 
         match pty
-            .sender
-            .send(PtyCommand::Resize(WindowSize::new(
-                col_width as u16,
-                row_height as u16,
-            )))
+            .resize(WindowSize {
+                cols: col_width as u16,
+                rows: row_height as u16,
+                xpixel: pix_width as u16,
+                ypixel: pix_height as u16,
+            })
             .await
         {
             Ok(()) => (),
