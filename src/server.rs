@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, sync::atomic::AtomicU64};
 
 use anyhow::Result;
 use russh::{
@@ -17,14 +17,18 @@ impl server::Server for Server {
     type Handler = Handler;
 
     fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Handler {
-        Handler::default()
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Handler { id, ..Default::default() }
     }
 }
 
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Default)]
 pub struct Handler {
-    requested_ptys: HashMap<ChannelId, PtyRequest>,
-    ptys: HashMap<ChannelId, Pty>,
+    id: u64,
+    requested_ptys: HashMap<u64, PtyRequest>,
+    ptys: HashMap<u64, Pty>,
 }
 
 #[derive(Debug)]
@@ -82,10 +86,10 @@ pub enum PtyCommand {
 pub enum ServerError {
     #[error(transparent)]
     Russh(#[from] russh::Error),
-    #[error("the channel did not have a pty request (id: `{channel}`)")]
-    NoPtyRequest { channel: ChannelId },
-    #[error("the channel did not have a pty to communicate with (id: `{channel}`)")]
-    NoPty { channel: ChannelId },
+    #[error("the handle did not have a pty request (id: `{id}`)")]
+    NoPtyRequest { id: u64 },
+    #[error("the handle did not have a pty to communicate with (id: `{id}`)")]
+    NoPty { id: u64 },
     #[error(transparent)]
     PtyErr(#[from] PtyError),
     #[error(transparent)]
@@ -137,10 +141,10 @@ impl server::Handler for Handler {
         modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        log::info!("PTY requested (id: {})", channel);
+        log::info!("PTY requested (id: {})", self.id);
 
         self.requested_ptys.insert(
-            channel,
+            self.id,
             PtyRequest {
                 _term: term.to_string(),
                 cols,
@@ -151,7 +155,7 @@ impl server::Handler for Handler {
             },
         );
 
-        log::info!("PTY aquired successfully (id: {})", channel);
+        log::info!("PTY aquired successfully (id: {})", self.id);
 
         session.channel_success(channel)?;
         Ok(())
@@ -162,12 +166,12 @@ impl server::Handler for Handler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        log::info!("channel requesting shell (id: {})", channel);
+        log::info!("channel requesting shell (id: {})", self.id);
 
         let request = match self
             .requested_ptys
-            .remove(&channel)
-            .ok_or(ServerError::NoPtyRequest { channel })
+            .remove(&self.id)
+            .ok_or(ServerError::NoPtyRequest { id: self.id })
         {
             Ok(r) => r,
             Err(e) => {
@@ -192,6 +196,8 @@ impl server::Handler for Handler {
 
         let handle = session.handle();
 
+        let id = self.id;
+
         tokio::spawn(async move {
             let mut buffer = [0u8; 8192];
 
@@ -206,7 +212,7 @@ impl server::Handler for Handler {
                                 }
                             }
                             Err(e) => {
-                                log::error!("PTY read error: {e}");
+                                log::error!("PTY read error: {e} (id: {})", id);
                                 break;
                             }
                         }
@@ -221,7 +227,7 @@ impl server::Handler for Handler {
                             }
                             Some(PtyCommand::Resize(size)) => {
                                 if let Err(e) = master.resize(size) {
-                                    log::error!("PTY resize error: {e}");
+                                    log::error!("PTY resize error: {e} (id: {})", id);
                                 }
                             }
                             Some(PtyCommand::Close) | None => break,
@@ -235,14 +241,14 @@ impl server::Handler for Handler {
         });
 
         self.ptys.insert(
-            channel,
+            self.id,
             Pty {
                 sender: tx,
                 child: Box::new(child),
             },
         );
 
-        log::info!("channel successfully aquired shell (id: {})", channel);
+        log::info!("channel successfully aquired shell (id: {})", self.id);
 
         session.channel_success(channel)?;
         Ok(())
@@ -250,13 +256,13 @@ impl server::Handler for Handler {
 
     async fn data(
         &mut self,
-        channel: ChannelId,
+        _channel: ChannelId,
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.ptys
-            .get(&channel)
-            .ok_or(ServerError::NoPty { channel })?
+            .get(&self.id)
+            .ok_or(ServerError::NoPty { id: self.id })?
             .write(data.to_vec())
             .await?;
 
@@ -274,8 +280,8 @@ impl server::Handler for Handler {
     ) -> Result<(), Self::Error> {
         let pty = self
             .ptys
-            .get(&channel)
-            .ok_or(ServerError::NoPty { channel })?;
+            .get(&self.id)
+            .ok_or(ServerError::NoPty { id: self.id })?;
 
         match pty
             .resize(WindowSize {
@@ -293,7 +299,7 @@ impl server::Handler for Handler {
             }
         };
 
-        log::trace!("Window resize {}x{}", row_height, col_width);
+        log::trace!("Window resize {}x{} (id: {})", row_height, col_width, self.id);
 
         session.channel_success(channel)?;
 
