@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result};
+use anyhow::Result;
 use crossterm::terminal;
 use russh::{ChannelMsg, Disconnect, client};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
