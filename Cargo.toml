@@ -1,0 +1,14 @@
+[package]
+name = "rc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+crossterm = "0.29.0"
+rand = "0.10.3"
+russh = { version = "0.64.1", features = ["aws-lc-rs"] }
+rust-pty = "0.6.1"
+thiserror = "2.0.21"
+tokio = { version = "1", features = ["full"] }
