@@ -159,7 +159,7 @@ impl server::Handler for Handler {
             Ok(r) => r,
             Err(e) => {
                 session.channel_failure(channel)?;
-                return Err(e.into());
+                return Err(e);
             }
         };
 
