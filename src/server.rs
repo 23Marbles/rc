@@ -18,7 +18,10 @@ impl server::Server for Server {
 
     fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Handler {
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Handler { id, ..Default::default() }
+        Handler {
+            id,
+            ..Default::default()
+        }
     }
 }
 
@@ -52,7 +55,6 @@ impl Pty {
     }
 
     pub async fn resize(&self, size: WindowSize) -> Result<(), mpsc::error::SendError<PtyCommand>> {
-
         self.sender.send(PtyCommand::Resize(size)).await
     }
 
@@ -299,7 +301,12 @@ impl server::Handler for Handler {
             }
         };
 
-        log::trace!("Window resize {}x{} (id: {})", row_height, col_width, self.id);
+        log::trace!(
+            "Window resize {}x{} (id: {})",
+            row_height,
+            col_width,
+            self.id
+        );
 
         session.channel_success(channel)?;
 
