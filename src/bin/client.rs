@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::terminal;
+use rc::Args;
 use russh::{ChannelMsg, Disconnect, client};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -35,9 +37,11 @@ impl Drop for RawTerminal {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
+
     let mut session = russh::client::connect(
         Arc::new(russh::client::Config::default()),
-        ("127.0.0.1", 2222),
+        (args.ip_addr, args.socket.unwrap_or(2222)),
         Client,
     )
     .await?;
