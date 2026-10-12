@@ -1,19 +1,95 @@
-use std::{collections::HashMap, fmt::Debug, sync::atomic::AtomicU64};
+pub use russh::server::*;
+
+use std::path::PathBuf;
+use std::{collections::HashMap, fmt::Debug, net::IpAddr, sync::atomic::AtomicU64};
+use std::{fs, io};
 
 use anyhow::Result;
-use russh::{
-    Channel, ChannelId,
-    server::{self, Auth, Msg, Session},
-};
+use russh::{Channel, ChannelId};
 use rust_pty::{
     NativePtySystem, PtyChild, PtyConfigBuilder, PtyError, PtyMaster, PtySystem, WindowSize,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+#[derive(Debug, clap::Parser)]
+pub struct Args {
+    pub ip_addr: IpAddr,
+    #[command(subcommand)]
+    pub users: UsersArg,
+    #[arg(long, short)]
+    pub socket: Option<u16>,
+}
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum UsersArg {
+    /// Input a name and password pair to use
+    Manual { name: String, password: String },
+    /// Specify user and passwords pairs as coming from this file.
+    /// The format is a string delimited by ';' with the user name
+    /// and password being whitespace delimited
+    File { path: PathBuf },
+}
+
+impl UsersArg {
+    pub fn to_hash_map(&self) -> io::Result<HashMap<String, String>> {
+        let mut map = HashMap::new();
+
+        match self {
+            UsersArg::Manual { name, password } => {
+                map.insert(name.clone(), password.clone());
+            }
+            UsersArg::File { path } => {
+                fn parse_pasword_pair(s: &str) -> io::Result<(String, String)> {
+                    if s.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "no data to parse",
+                        ));
+                    }
+
+                    let mut split = s.split_whitespace();
+
+                    let name = split.next().unwrap();
+
+                    let password = split.next().ok_or(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("no password supplied for name `{}`", name),
+                    ))?;
+
+                    let _ = split.next().is_none().ok_or(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("only expected two parts, (name & password), got more"),
+                    ))?;
+
+                    Ok((name.to_string(), password.to_string()))
+                }
+
+                let file_contents = fs::read_to_string(path)?;
+
+                for pair in file_contents.split(';') {
+                    let (name, password) = parse_pasword_pair(pair)?;
+
+                    map.insert(name.clone(), password)
+                        .ok_or(io::Error::other(format!(
+                            "name already has a defined password {name}"
+                        )))?;
+                }
+
+                assert!(
+                    !map.is_empty(),
+                    "cannot connect to a server with no user, password pairs"
+                );
+            }
+        };
+
+        Ok(map)
+    }
+}
+
 pub struct Server;
 
-impl server::Server for Server {
+impl russh::server::Server for Server {
     type Handler = Handler;
 
     fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Handler {
@@ -100,7 +176,7 @@ pub enum ServerError {
     ChannelSendErr(#[from] mpsc::error::SendError<PtyCommand>),
 }
 
-impl server::Handler for Handler {
+impl russh::server::Handler for Handler {
     type Error = ServerError;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
@@ -122,7 +198,7 @@ impl server::Handler for Handler {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
-        reply: server::ChannelOpenHandle,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         log::info!("Channel open session");

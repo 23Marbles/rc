@@ -3,8 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::terminal;
-use rc::Args;
-use russh::{ChannelMsg, Disconnect, client};
+use rc::client;
+use russh::{ChannelMsg, Disconnect};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct Client;
@@ -37,7 +37,7 @@ impl Drop for RawTerminal {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = client::Args::parse();
 
     let mut session = russh::client::connect(
         Arc::new(russh::client::Config::default()),
@@ -46,7 +46,9 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let auth = session.authenticate_password("demo", "demo").await?;
+    let auth = session
+        .authenticate_password(args.user, args.password)
+        .await?;
 
     if !auth.success() {
         anyhow::bail!("Authentication failed");
