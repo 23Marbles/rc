@@ -105,6 +105,7 @@ impl UsersArg {
 
 pub struct Server {
     pub shutdown: CancellationToken,
+    pub user_store_path: PathBuf,
 }
 
 impl russh::server::Server for Server {

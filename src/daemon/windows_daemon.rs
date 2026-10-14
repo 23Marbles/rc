@@ -12,7 +12,7 @@ use windows_service::{
     service_dispatcher,
 };
 
-use crate::daemon::{SERVICE_NAME, read_cfg_file};
+use crate::daemon::{SERVICE_NAME, read_cfg_file, users::USER_STORE_FILE_PATH};
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -58,9 +58,13 @@ fn run_service() -> anyhow::Result<()> {
         .build()?;
 
     // Load your server configuration from a file here.
-    let args = read_cfg_file()?.args;
+    let args = read_cfg_file()?;
 
-    let result = runtime.block_on(crate::run_server(args, shutdown));
+    let result = runtime.block_on(crate::run_server(
+        args,
+        USER_STORE_FILE_PATH.clone(),
+        shutdown,
+    ));
 
     status_handle
         .set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()))?;

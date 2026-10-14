@@ -1,4 +1,4 @@
-use std::{fs::OpenOptions, net::SocketAddr, sync::Arc};
+use std::{fs::OpenOptions, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use russh::{
@@ -12,8 +12,12 @@ pub mod client;
 pub mod daemon;
 pub mod server;
 
-pub async fn run_server(args: server::Args, shutdown: CancellationToken) -> Result<()> {
-    if let Some(path) = args.log_path {
+pub async fn run_server(
+    cfg: daemon::Config,
+    user_store_path: PathBuf,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    if let Some(path) = cfg.log_path {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         env_logger::Builder::new()
@@ -26,7 +30,7 @@ pub async fn run_server(args: server::Args, shutdown: CancellationToken) -> Resu
             .init();
     }
 
-    let listening_addr = SocketAddr::new(args.ip_addr, args.socket.unwrap_or(2222));
+    let listening_addr = SocketAddr::new(cfg.ip, cfg.port.unwrap_or(2222));
 
     let config = server::Config {
         keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?],
@@ -40,6 +44,7 @@ pub async fn run_server(args: server::Args, shutdown: CancellationToken) -> Resu
 
     let mut server = server::Server {
         shutdown: shutdown.clone(),
+        user_store_path,
     };
 
     let _ = tokio::select! {

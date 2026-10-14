@@ -1,18 +1,18 @@
-use std::{fs, path::PathBuf, sync::LazyLock};
+use std::{fs, net::IpAddr, path::PathBuf, sync::LazyLock};
 
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::server;
-
+pub mod users;
 #[cfg(windows)]
 pub mod windows_daemon;
 
 pub const SERVICE_NAME: &str = "rc.server-daemon";
 
 static CONFIG_FOLDER_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    let home = std::env::home_dir().unwrap();
+    let base = BaseDirs::new().unwrap();
 
-    let cfg_path = home.join(r"\rc-ssh");
+    let cfg_path = base.config_dir().join(r"\rc-ssh");
 
     if !cfg_path.exists() {
         std::fs::create_dir_all(&cfg_path).unwrap();
@@ -25,7 +25,9 @@ const CONFIG_FILE_NAME: &str = "rc-server-config.toml";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-    pub args: server::Args,
+    pub ip: IpAddr,
+    pub port: Option<u16>,
+    pub log_path: Option<PathBuf>,
 }
 
 pub fn write_cfg_file(cfg: Config) -> anyhow::Result<()> {
