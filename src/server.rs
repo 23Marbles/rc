@@ -1,4 +1,5 @@
 pub use russh::server::*;
+use tokio_util::sync::CancellationToken;
 
 use std::path::PathBuf;
 use std::{collections::HashMap, fmt::Debug, net::IpAddr, sync::atomic::AtomicU64};
@@ -6,14 +7,14 @@ use std::{fs, io};
 
 use anyhow::Result;
 use russh::{Channel, ChannelId};
-use rust_pty::{
-    NativePtySystem, PtyChild, PtyConfigBuilder, PtyError, PtyMaster, PtySystem, WindowSize,
-};
+use rust_pty::{NativePtySystem, PtyConfigBuilder, PtyError, PtyMaster, PtySystem, WindowSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-#[derive(Debug, clap::Parser)]
+#[derive(Debug, clap::Parser, serde::Deserialize, serde::Serialize)]
 pub struct Args {
+    #[arg(long, short)]
+    pub log_path: Option<PathBuf>,
     pub ip_addr: IpAddr,
     #[command(subcommand)]
     pub users: UsersArg,
@@ -21,7 +22,22 @@ pub struct Args {
     pub socket: Option<u16>,
 }
 
-#[derive(Debug, Clone, clap::Subcommand)]
+impl Args {
+    pub fn canonicalize(&mut self) -> io::Result<()> {
+        if let Some(path) = self.log_path.take() {
+            self.log_path = Some(path.canonicalize()?)
+        }
+
+        match &mut self.users {
+            UsersArg::File { path } => *path = path.clone().canonicalize()?,
+            _ => (),
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, clap::Subcommand, serde::Deserialize, serde::Serialize)]
 pub enum UsersArg {
     /// Input a name and password pair to use
     Manual { name: String, password: String },
@@ -87,7 +103,9 @@ impl UsersArg {
     }
 }
 
-pub struct Server;
+pub struct Server {
+    pub shutdown: CancellationToken,
+}
 
 impl russh::server::Server for Server {
     type Handler = Handler;
@@ -95,6 +113,7 @@ impl russh::server::Server for Server {
     fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Handler {
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Handler {
+            shutdown: self.shutdown.child_token(),
             id,
             ..Default::default()
         }
@@ -105,6 +124,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Default)]
 pub struct Handler {
+    shutdown: CancellationToken,
     id: u64,
     requested_ptys: HashMap<u64, PtyRequest>,
     ptys: HashMap<u64, Pty>,
@@ -120,9 +140,9 @@ struct PtyRequest {
     _modes: Vec<(russh::Pty, u32)>,
 }
 
+#[derive(Debug)]
 struct Pty {
     sender: tokio::sync::mpsc::Sender<PtyCommand>,
-    child: Box<dyn PtyChild>,
 }
 
 impl Pty {
@@ -137,20 +157,9 @@ impl Pty {
     pub async fn close(&mut self) -> Result<(), ServerError> {
         log::info!("Closing pty");
 
-        if self.child.is_running() {
-            self.sender.send(PtyCommand::Close).await?;
-            self.child.kill()?;
-        }
+        self.sender.send(PtyCommand::Close).await?;
 
         Ok(())
-    }
-}
-
-impl Debug for Pty {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pty")
-            .field("sender", &self.sender)
-            .finish_non_exhaustive()
     }
 }
 
@@ -262,7 +271,7 @@ impl russh::server::Handler for Handler {
             .window_size(request.cols as u16, request.rows as u16)
             .build();
 
-        let (mut master, child) = match NativePtySystem::spawn_shell(&cfg).await {
+        let (mut master, mut child) = match NativePtySystem::spawn_shell(&cfg).await {
             Ok(r) => r,
             Err(e) => {
                 session.channel_failure(channel)?;
@@ -275,6 +284,8 @@ impl russh::server::Handler for Handler {
         let handle = session.handle();
 
         let id = self.id;
+
+        let shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
             let mut buffer = [0u8; 8192];
@@ -290,7 +301,7 @@ impl russh::server::Handler for Handler {
                                 }
                             }
                             Err(e) => {
-                                log::error!("PTY read error: {e} (id: {})", id);
+                                log::error!("PTY read error: {e} (id: {id})");
                                 break;
                             }
                         }
@@ -305,26 +316,34 @@ impl russh::server::Handler for Handler {
                             }
                             Some(PtyCommand::Resize(size)) => {
                                 if let Err(e) = master.resize(size) {
-                                    log::error!("PTY resize error: {e} (id: {})", id);
+                                    log::error!("PTY resize error: {e} (id: {id})");
                                 }
                             }
-                            Some(PtyCommand::Close) | None => break,
+                            Some(PtyCommand::Close) | None => {
+                                break;
+                            },
                         }
                     }
+
+                    _ = shutdown.cancelled() => {
+                        break;
+                    }
                 }
+            }
+
+            if let Err(e) = master.close() {
+                log::error!("Error closing PTY master: {e} (id: {id})")
+            }
+
+            if let Err(e) = child.kill() {
+                log::error!("Error killing PTY child: {e} (id: {id})")
             }
 
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;
         });
 
-        self.ptys.insert(
-            self.id,
-            Pty {
-                sender: tx,
-                child: Box::new(child),
-            },
-        );
+        self.ptys.insert(self.id, Pty { sender: tx });
 
         log::info!("channel successfully aquired shell (id: {})", self.id);
 

@@ -1,23 +1,15 @@
-use std::{
-    env,
-    ffi::OsString,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{Arc, LazyLock},
-};
+use std::{env, ffi::OsString, fs, path::PathBuf, sync::LazyLock};
 
 use anyhow::Result;
 use clap::Parser;
-use rc::server::{self, Server};
-use russh::{
-    keys::{Algorithm, PrivateKey},
-    server::Server as _,
+use rc::{
+    daemon::{self, Config, write_cfg_file},
+    server::{self},
 };
 use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceManager, ServiceStartCtx, ServiceStatus,
     ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx,
 };
-use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, clap::Parser)]
@@ -45,15 +37,11 @@ pub enum ServerRunnerArgs {
         #[command(flatten)]
         args: server::Args,
     },
-    /// Run the server as a daemon
-    RunDaemon {
-        #[command(flatten)]
-        args: server::Args,
-    },
+    /// Run the server as a daemon, reading args from the config file
+    RunDaemon,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = ServerRunnerArgs::parse();
 
     match args {
@@ -62,15 +50,32 @@ async fn main() -> Result<()> {
             exe_path,
             working_directory,
         } => start_daemon(args, exe_path, working_directory),
-        ServerRunnerArgs::Run { args } => run_server(args, CancellationToken::new()).await,
+        ServerRunnerArgs::Run { args } => tokio::runtime::Builder::new_multi_thread()
+            .build()?
+            .block_on(async {
+                let shutdown = CancellationToken::new();
+                let shutdown_cloned = shutdown.clone();
+
+                tokio::select! {
+                    res = rc::run_server(args, shutdown_cloned) => {
+                        res?;
+                    }
+
+                    _ = tokio::signal::ctrl_c() => {
+                        shutdown.cancel();
+                    }
+                }
+
+                Ok(())
+            }),
         ServerRunnerArgs::UninstallDaemon => uninstall_daemon(),
         ServerRunnerArgs::StopDaemon => stop_daemon(),
-        ServerRunnerArgs::RunDaemon { args } => todo!(),
+        ServerRunnerArgs::RunDaemon => rc::daemon::run_daemon(),
     }
 }
 
 static SERVICE_LABEL: LazyLock<ServiceLabel> =
-    LazyLock::new(|| "rc.server-daemon".parse().unwrap());
+    LazyLock::new(|| daemon::SERVICE_NAME.parse().unwrap());
 
 fn uninstall_daemon() -> Result<()> {
     // Get generic service by detecting what is available on the platform
@@ -141,12 +146,25 @@ fn stop_daemon() -> Result<()> {
 }
 
 fn start_daemon(
-    args: server::Args,
+    mut args: server::Args,
     exe_path: Option<PathBuf>,
     working_directory: Option<PathBuf>,
 ) -> Result<()> {
     // Get generic service by detecting what is available on the platform
     let manager = <dyn ServiceManager>::native().expect("Failed to detect management platform");
+
+    if let Some(path) = args.log_path.clone() {
+        if !path.exists() {
+            fs::OpenOptions::new()
+                .create_new(true)
+                .append(true)
+                .open(path)?;
+        }
+    }
+
+    args.canonicalize()?;
+
+    write_cfg_file(Config { args })?;
 
     match manager.status(ServiceStatusCtx {
         label: SERVICE_LABEL.clone(),
@@ -160,31 +178,6 @@ fn start_daemon(
             let mut args_vec = Vec::new();
 
             args_vec.push(OsString::from("run-daemon"));
-
-            let server::Args {
-                ip_addr,
-                users,
-                socket,
-            } = args;
-
-            if let Some(port) = socket {
-                args_vec.push(OsString::from("--socket"));
-                args_vec.push(OsString::from(port.to_string()));
-            };
-
-            args_vec.push(OsString::from(ip_addr.to_string()));
-
-            match users {
-                server::UsersArg::Manual { name, password } => {
-                    args_vec.push(OsString::from("manual"));
-                    args_vec.push(OsString::from(name));
-                    args_vec.push(OsString::from(password));
-                }
-                server::UsersArg::File { path } => {
-                    args_vec.push(OsString::from("file"));
-                    args_vec.push(OsString::from(path));
-                }
-            }
 
             println!("Installing service");
             manager
@@ -225,33 +218,6 @@ fn start_daemon(
                 .expect("Failed to start")
         }
     };
-
-    Ok(())
-}
-
-async fn run_server(args: server::Args, cancel: CancellationToken) -> Result<()> {
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Info)
-        .init();
-
-    let listening_addr = SocketAddr::new(args.ip_addr, args.socket.unwrap_or(2222));
-
-    let config = server::Config {
-        keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?],
-        ..Default::default()
-    };
-
-    let config = Arc::new(config);
-    let listener = TcpListener::bind(listening_addr).await?;
-
-    log::info!("Listening on {listening_addr}");
-
-    let mut server = Server;
-
-    let _ = tokio::select! {
-        result = server.run_on_socket(config, &listener) => result,
-        _ = cancel.cancelled() => Ok(()),
-    }?;
 
     Ok(())
 }
