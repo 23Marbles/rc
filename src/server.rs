@@ -331,16 +331,13 @@ impl russh::server::Handler for Handler {
                 }
             }
 
-            if let Err(e) = master.close() {
-                log::error!("Error closing PTY master: {e} (id: {id})")
-            }
-
-            if let Err(e) = child.kill() {
-                log::error!("Error killing PTY child: {e} (id: {id})")
-            }
+            let _ = master.close();
+            let _ = child.kill();
 
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;
+
+            log::info!("PTY exited (id: {id})");
         });
 
         self.ptys.insert(self.id, Pty { sender: tx });
