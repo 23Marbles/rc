@@ -1,4 +1,4 @@
-use std::{fs::OpenOptions, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{fs::OpenOptions, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use russh::{
@@ -8,14 +8,25 @@ use russh::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::users::UserStore;
+
 pub mod client;
 pub mod daemon;
 pub mod server;
 
 pub async fn run_server(
     cfg: daemon::Config,
-    user_store_path: PathBuf,
+    user_store: UserStore,
     shutdown: CancellationToken,
+) -> Result<()> {
+    run_server_with_ready(cfg, user_store, shutdown, || Ok(())).await
+}
+
+pub async fn run_server_with_ready(
+    cfg: daemon::Config,
+    user_store: UserStore,
+    shutdown: CancellationToken,
+    on_ready: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     if let Some(path) = cfg.log_path {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -30,6 +41,8 @@ pub async fn run_server(
             .init();
     }
 
+    log::info!("Begin server initialisation");
+
     let listening_addr = SocketAddr::new(cfg.ip, cfg.port.unwrap_or(2222));
 
     let config = server::Config {
@@ -41,10 +54,11 @@ pub async fn run_server(
     let listener = TcpListener::bind(listening_addr).await?;
 
     log::info!("Listening on {listening_addr}");
+    on_ready()?;
 
     let mut server = server::Server {
         shutdown: shutdown.clone(),
-        user_store_path,
+        user_store,
     };
 
     let _ = tokio::select! {

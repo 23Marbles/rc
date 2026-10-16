@@ -1,15 +1,18 @@
+use argon2::{Argon2, Params, PasswordHasher, PasswordVerifier, Version, password_hash};
 pub use russh::server::*;
 use tokio_util::sync::CancellationToken;
 
+use std::io;
 use std::path::PathBuf;
 use std::{collections::HashMap, fmt::Debug, net::IpAddr, sync::atomic::AtomicU64};
-use std::{fs, io};
 
 use anyhow::Result;
 use russh::{Channel, ChannelId};
 use rust_pty::{NativePtySystem, PtyConfigBuilder, PtyError, PtyMaster, PtySystem, WindowSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+
+use crate::daemon::users::UserStore;
 
 #[derive(Debug, clap::Parser, serde::Deserialize, serde::Serialize)]
 pub struct Args {
@@ -48,64 +51,42 @@ pub enum UsersArg {
 }
 
 impl UsersArg {
-    pub fn to_hash_map(&self) -> io::Result<HashMap<String, String>> {
-        let mut map = HashMap::new();
+    pub fn to_user_store(&self) -> anyhow::Result<UserStore> {
+        let store;
 
         match self {
             UsersArg::Manual { name, password } => {
-                map.insert(name.clone(), password.clone());
+                let hasher = Argon2::new(
+                    argon2::Algorithm::Argon2id,
+                    Version::default(),
+                    Params::DEFAULT,
+                );
+
+                let hash = hasher.hash_password(password.as_bytes())?;
+
+                let mut map = HashMap::new();
+
+                map.insert(name.clone(), hash);
+
+                store = UserStore { store: map }
             }
             UsersArg::File { path } => {
-                fn parse_pasword_pair(s: &str) -> io::Result<(String, String)> {
-                    if s.is_empty() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "no data to parse",
-                        ));
-                    }
-
-                    let mut split = s.split_whitespace();
-
-                    let name = split.next().unwrap();
-
-                    let password = split.next().ok_or(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("no password supplied for name `{}`", name),
-                    ))?;
-
-                    let _ = split.next().is_none().ok_or(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("only expected two parts, (name & password), got more"),
-                    ))?;
-
-                    Ok((name.to_string(), password.to_string()))
-                }
-
-                let file_contents = fs::read_to_string(path)?;
-
-                for pair in file_contents.split(';') {
-                    let (name, password) = parse_pasword_pair(pair)?;
-
-                    map.insert(name.clone(), password)
-                        .ok_or(io::Error::other(format!(
-                            "name already has a defined password {name}"
-                        )))?;
-                }
+                store = UserStore::read_from_file(path)?;
 
                 assert!(
-                    !map.is_empty(),
+                    !store.store.is_empty(),
                     "cannot connect to a server with no user, password pairs"
                 );
             }
         };
 
-        Ok(map)
+        Ok(store)
     }
 }
 
 pub struct Server {
     pub shutdown: CancellationToken,
-    pub user_store_path: PathBuf,
+    pub user_store: UserStore,
 }
 
 impl russh::server::Server for Server {
@@ -113,9 +94,11 @@ impl russh::server::Server for Server {
 
     fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Handler {
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Handler {
             shutdown: self.shutdown.child_token(),
             id,
+            user_store: self.user_store.clone(),
             ..Default::default()
         }
     }
@@ -125,6 +108,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Default)]
 pub struct Handler {
+    user_store: UserStore,
     shutdown: CancellationToken,
     id: u64,
     requested_ptys: HashMap<u64, PtyRequest>,
@@ -156,7 +140,7 @@ impl Pty {
     }
 
     pub async fn close(&mut self) -> Result<(), ServerError> {
-        log::info!("Closing pty");
+        log::info!("Sending close signal");
 
         self.sender.send(PtyCommand::Close).await?;
 
@@ -184,25 +168,45 @@ pub enum ServerError {
     IoErr(#[from] std::io::Error),
     #[error(transparent)]
     ChannelSendErr(#[from] mpsc::error::SendError<PtyCommand>),
+    #[error(transparent)]
+    PasswordError(#[from] password_hash::Error),
 }
 
 impl russh::server::Handler for Handler {
     type Error = ServerError;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        // Development-only credentials.
-        Ok(if user == "demo" && password == "demo" {
-            log::info!("User authenticated");
+        let Some(hash) = self.user_store.store.get(user) else {
+            log::warn!("Username '{user}' not found in store");
 
-            Auth::Accept
-        } else {
-            log::warn!("User failed authentication");
-
-            Auth::Reject {
+            return Ok(Auth::Reject {
                 proceed_with_methods: None,
                 partial_success: false,
+            });
+        };
+
+        let hasher = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            Version::default(),
+            Params::DEFAULT,
+        );
+
+        match hasher.verify_password(password.as_bytes(), hash) {
+            Ok(()) => {
+                log::info!("User authenticated");
+
+                Ok(Auth::Accept)
             }
-        })
+            Err(password_hash::Error::PasswordInvalid) => {
+                log::warn!("User failed authentication");
+
+                Ok(Auth::Reject {
+                    proceed_with_methods: None,
+                    partial_success: false,
+                })
+            }
+            Err(e) => Err(ServerError::PasswordError(e)),
+        }
     }
 
     async fn channel_open_session(

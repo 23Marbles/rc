@@ -1,13 +1,18 @@
-use std::{collections::HashMap, fs::OpenOptions, path::PathBuf, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use argon2::PasswordHash;
 
-use crate::daemon::CONFIG_FOLDER_PATH;
+use crate::daemon::BASE_DATA_PATH;
 
 pub const USER_STORE_FILE_NAME: &str = "user-store.toml";
 
 pub static USER_STORE_FILE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    let cfg_folder = CONFIG_FOLDER_PATH.clone();
+    let cfg_folder = BASE_DATA_PATH.clone();
 
     cfg_folder.join(USER_STORE_FILE_NAME)
 });
@@ -18,13 +23,13 @@ pub struct UserRecord {
     password_hash: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct UserStore {
-    store: HashMap<String, PasswordHash>,
+    pub store: HashMap<String, PasswordHash>,
 }
 
 impl UserStore {
-    pub fn read_from_file(path: PathBuf) -> anyhow::Result<Self> {
+    pub fn read_from_file(path: &Path) -> anyhow::Result<Self> {
         let mut rdr = csv::Reader::from_path(path)?;
 
         let mut store = HashMap::new();
@@ -47,8 +52,12 @@ impl UserStore {
     }
 
     /// Write to the user store and overwrite previous contents
-    pub fn write_to_file(&self, path: PathBuf) -> anyhow::Result<()> {
-        let file = OpenOptions::new().write(true).truncate(true).open(path)?;
+    pub fn write_to_file(&self, path: &Path) -> anyhow::Result<()> {
+        let file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(path)?;
 
         let mut writer = csv::WriterBuilder::new().from_writer(file);
 
@@ -57,6 +66,19 @@ impl UserStore {
                 name: name.clone(),
                 password_hash: hash.to_string(),
             })?;
+        }
+
+        Ok(())
+    }
+
+    /// Write to the user store and overwrite previous contents
+    pub fn append_to_file(&self, path: &Path) -> anyhow::Result<()> {
+        let file = OpenOptions::new().write(true).append(true).open(path)?;
+
+        let mut writer = csv::WriterBuilder::new().from_writer(file);
+
+        for (name, hash) in self.store.iter() {
+            writer.serialize((name, hash.to_string()))?;
         }
 
         Ok(())
