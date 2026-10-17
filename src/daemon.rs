@@ -70,17 +70,20 @@ pub fn run_daemon() -> anyhow::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        use crate::run_server;
-        use tokio_util::sync::CancellationToken;
-
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
 
-        // Load your server configuration from a file here.
-        let args = read_cfg_file()?.args;
+        let cfg = read_cfg_file()?;
+        let user_store = crate::daemon::users::UserStore::read_from_file(
+            &crate::daemon::users::USER_STORE_FILE_PATH,
+        )?;
 
-        runtime.block_on(crate::run_server(args, CancellationToken::new()))?;
+        runtime.block_on(crate::run_server(
+            cfg,
+            user_store,
+            tokio_util::sync::CancellationToken::new(),
+        ))?;
     }
 
     Ok(())
