@@ -30,9 +30,20 @@ fn get_tailscale_ip(machine_name: Option<impl AsRef<OsStr>>) -> anyhow::Result<I
 
     let output = program.output()?;
 
+    if !output.status.success() {
+        let stderr = output.stderr;
+
+        let stderr_string = String::from_utf8_lossy(&stderr);
+
+        anyhow::bail!("Tailscale failed: {stderr_string}");
+    }
+
     let string = String::from_utf8(output.stdout)?;
 
-    Ok(string.trim().parse()?)
+    Ok(string
+        .trim()
+        .parse()
+        .expect("Tailscale should output a correctly formatted ip address"))
 }
 
 pub async fn run_server(
