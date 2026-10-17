@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
 
     let mut session = russh::client::connect(
         Arc::new(russh::client::Config::default()),
-        (args.ip_addr, args.socket.unwrap_or(2222)),
+        (args.get_ip_addr()?, args.socket.unwrap_or(2222)),
         Client,
     )
     .await?;

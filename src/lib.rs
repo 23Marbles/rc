@@ -1,4 +1,10 @@
-use std::{fs::OpenOptions, net::SocketAddr, sync::Arc};
+use std::{
+    ffi::OsStr,
+    fs::OpenOptions,
+    net::{IpAddr, SocketAddr},
+    process::Command,
+    sync::Arc,
+};
 
 use anyhow::Result;
 use russh::{
@@ -13,6 +19,21 @@ use crate::daemon::users::UserStore;
 pub mod client;
 pub mod daemon;
 pub mod server;
+
+fn get_tailscale_ip(machine_name: Option<impl AsRef<OsStr>>) -> anyhow::Result<IpAddr> {
+    let mut program = Command::new("tailscale");
+    program.args(["ip", "-4"]);
+
+    if let Some(name) = machine_name {
+        program.arg(name);
+    }
+
+    let output = program.output()?;
+
+    let string = String::from_utf8(output.stdout)?;
+
+    Ok(string.trim().parse()?)
+}
 
 pub async fn run_server(
     cfg: daemon::Config,

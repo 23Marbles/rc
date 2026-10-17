@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::process::Command;
 use std::str::FromStr;
 use std::{collections::HashMap, fmt::Debug, net::IpAddr, sync::atomic::AtomicU64};
 
@@ -17,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::daemon::users::UserStore;
+use crate::get_tailscale_ip;
 
 #[derive(Debug, clap::Parser, serde::Deserialize, serde::Serialize)]
 pub struct Args {
@@ -29,25 +29,10 @@ pub struct Args {
     pub socket: Option<u16>,
 }
 
-fn get_tailscale_ip(machine_name: Option<String>) -> anyhow::Result<IpAddr> {
-    let mut program = Command::new("tailscale");
-    program.args(["ip", "-4"]);
-
-    if let Some(name) = machine_name {
-        program.arg(name);
-    }
-
-    let output = program.output()?;
-
-    let string = String::from_utf8(output.stdout)?;
-
-    Ok(string.trim().parse()?)
-}
-
 impl Args {
     pub fn get_ip_addr(&self) -> anyhow::Result<IpAddr> {
         match self.ip_addr {
-            ListenAddress::Tailscale => get_tailscale_ip(None),
+            ListenAddress::Tailscale => get_tailscale_ip(None::<&str>),
             ListenAddress::Localhost => Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             ListenAddress::Lan => Ok(local_ip()?),
             ListenAddress::Ip(ip_addr) => Ok(ip_addr),
