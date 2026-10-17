@@ -57,33 +57,35 @@ fn main() -> Result<()> {
             exe_path,
             working_directory,
         } => install_daemon(args, exe_path, working_directory),
-        ServerRunnerArgs::Run { args } => tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async {
-                let shutdown = CancellationToken::new();
-                let shutdown_cloned = shutdown.clone();
+        ServerRunnerArgs::Run { args } => {
+            let cfg = Config {
+                ip: args.get_ip_addr()?,
+                port: args.socket,
+                log_path: args.log_path,
+            };
 
-                let cfg = Config {
-                    ip: args.ip_addr,
-                    port: args.socket,
-                    log_path: args.log_path,
-                };
+            let user_store = args.users.to_user_store()?;
 
-                let user_store = args.users.to_user_store()?;
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let shutdown = CancellationToken::new();
+                    let shutdown_cloned = shutdown.clone();
 
-                tokio::select! {
-                    res = rc::run_server(cfg, user_store, shutdown_cloned) => {
-                        res?;
+                    tokio::select! {
+                        res = rc::run_server(cfg, user_store, shutdown_cloned) => {
+                            res?;
+                        }
+
+                        _ = tokio::signal::ctrl_c() => {
+                            shutdown.cancel();
+                        }
                     }
 
-                    _ = tokio::signal::ctrl_c() => {
-                        shutdown.cancel();
-                    }
-                }
-
-                Ok(())
-            }),
+                    Ok(())
+                })
+        }
         ServerRunnerArgs::UninstallDaemon => uninstall_daemon(),
         ServerRunnerArgs::StartDaemon => start_daemon(),
         ServerRunnerArgs::StopDaemon => stop_daemon(),
@@ -137,7 +139,7 @@ fn install_daemon(
     args.canonicalize()?;
 
     write_cfg_file(Config {
-        ip: args.ip_addr,
+        ip: args.get_ip_addr()?,
         port: args.socket,
         log_path: Some(
             args.log_path

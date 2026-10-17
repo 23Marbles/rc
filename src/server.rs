@@ -1,9 +1,13 @@
 use argon2::{Argon2, Params, PasswordHasher, PasswordVerifier, Version, password_hash};
+use local_ip_address::local_ip;
 pub use russh::server::*;
 use tokio_util::sync::CancellationToken;
 
 use std::io;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::process::Command;
+use std::str::FromStr;
 use std::{collections::HashMap, fmt::Debug, net::IpAddr, sync::atomic::AtomicU64};
 
 use anyhow::Result;
@@ -18,11 +22,61 @@ use crate::daemon::users::UserStore;
 pub struct Args {
     #[arg(long, short)]
     pub log_path: Option<PathBuf>,
-    pub ip_addr: IpAddr,
+    ip_addr: ListenAddress,
     #[command(subcommand)]
     pub users: UsersArg,
     #[arg(long, short)]
     pub socket: Option<u16>,
+}
+
+fn get_tailscale_ip(machine_name: Option<String>) -> anyhow::Result<IpAddr> {
+    let mut program = Command::new("tailscale");
+    program.args(["ip", "-4"]);
+
+    if let Some(name) = machine_name {
+        program.arg(name);
+    }
+
+    let output = program.output()?;
+
+    let string = String::from_utf8(output.stdout)?;
+
+    Ok(string.trim().parse()?)
+}
+
+impl Args {
+    pub fn get_ip_addr(&self) -> anyhow::Result<IpAddr> {
+        match self.ip_addr {
+            ListenAddress::Tailscale => get_tailscale_ip(None),
+            ListenAddress::Localhost => Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            ListenAddress::Lan => Ok(local_ip()?),
+            ListenAddress::Ip(ip_addr) => Ok(ip_addr),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+enum ListenAddress {
+    Tailscale,
+    Localhost,
+    Lan,
+    Ip(IpAddr),
+}
+
+impl FromStr for ListenAddress {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "tailscale" => Ok(Self::Tailscale),
+            "localhost" => Ok(Self::Localhost),
+            "lan" => Ok(Self::Lan),
+            _ => s
+                .parse::<IpAddr>()
+                .map(Self::Ip)
+                .map_err(|_| format!("Invalid listen address: {s}")),
+        }
+    }
 }
 
 impl Args {
